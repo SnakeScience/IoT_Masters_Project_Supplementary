@@ -1,0 +1,75 @@
+#This code samples RPM and Audio data
+
+#Transmits the RPM values to ESP8266 through Serial
+#Transmits the Audio values to computer python script through Serial1
+
+
+
+// Audio Sampling Parameters
+const int sampleRate = 44100; // Sampling rate in Hz
+const int bufferSize = sampleRate; // Buffer size for 1 second of data
+int audioBuffer[bufferSize]; // Buffer to store audio data
+int bufferIndex = 0; // Current index in the buffer
+
+// RPM Measurement Parameters
+const int hallPin = 2; // Pin connected to the Hall effect sensor
+volatile int pulseCount = 0; // Pulse count for calculating RPM
+unsigned long lastPulseTime = 0; // Time of the last pulse
+float rpm = 0; // RPM value
+
+void setup() {
+  // Initialize Serial communication for audio data
+  Serial.begin(115200);
+  
+  // Initialize Serial1 communication for RPM data
+  Serial1.begin(115200);
+  
+  // Setup the Hall effect sensor pin as input
+  pinMode(hallPin, INPUT);
+  attachInterrupt(digitalPinToInterrupt(hallPin), countPulse, RISING);
+  
+  lastPulseTime = millis();
+}
+
+void loop() {
+  // Audio Sampling Code
+  if (bufferIndex < bufferSize) {
+    audioBuffer[bufferIndex] = analogRead(A0); // Read analog data from A0
+    bufferIndex++;
+  } else {
+    // Buffer is full, send start character and data over Serial
+    Serial.println("#"); // Start character indicating the beginning of data
+    for (int i = 0; i < bufferSize; i++) {
+      Serial.println(audioBuffer[i]); // Send each sample as a new line
+    }
+    Serial.println("!"); // Finisher character indicating the end of data
+
+    // Reset buffer index to start capturing new data
+    bufferIndex = 0;
+  }
+
+  // Maintain the sample rate
+  delayMicroseconds(1000000 / sampleRate);
+
+  // RPM Calculation and Output
+  if (millis() - lastPulseTime > 1000) {
+    detachInterrupt(digitalPinToInterrupt(hallPin));
+    
+    // Calculate RPM based on the time difference between pulses
+    rpm = (float)pulseCount * (60000.0 / (millis() - lastPulseTime));
+    
+    // Print the RPM to Serial1
+    Serial1.println(rpm);
+    
+    // Reset pulse count and time for the next calculation
+    pulseCount = 0;
+    lastPulseTime = millis();
+    
+    attachInterrupt(digitalPinToInterrupt(hallPin), countPulse, RISING);
+  }
+}
+
+void countPulse() {
+  // Increment pulse count for each Hall effect sensor pulse
+  pulseCount++;
+}
