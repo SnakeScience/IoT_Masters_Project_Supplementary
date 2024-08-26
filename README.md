@@ -1,4 +1,4 @@
-# IoT_Masters_Project
+# Ulster University Masters Project 
 
 This Github supository holds the code used within this project
 
