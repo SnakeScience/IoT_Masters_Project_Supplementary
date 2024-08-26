@@ -1,0 +1,571 @@
+# last changed 26/08/24
+
+# This code creates a GUI dashboard.
+# It runs both VAE and SVM models to provide bearing type predictions
+# Live RPM data is sampled in from MQTT
+
+
+import tkinter as tk
+from PIL import Image, ImageTk
+import os
+import paho.mqtt.client as mqtt
+from tkinter import StringVar, messagebox
+import threading
+import time
+import torch
+import torch.nn as nn
+import numpy as np
+from torchvision import transforms
+import socket
+
+import numpy as np
+from PIL import Image
+import joblib
+
+# MQTT settings
+BROKER = "192.168.0.35"  # Replace with your MQTT broker IP address
+PORT = 1883
+TOPIC = "sensor/rpm"
+
+# Directory containing the MEL spectrograms
+spectrogram_directory = "/Users/admin1/Documents/Audio/spectrograms"
+
+image_paths = [
+    '/Users/admin1/Documents/Audio/spectrograms/audio.png',
+    '/Users/admin1/Documents/Audio/spectrograms/audio1.png',
+    '/Users/admin1/Documents/Audio/spectrograms/audio2.png',
+    '/Users/admin1/Documents/Audio/spectrograms/audio3.png'
+]
+
+prediction_vars = {}
+
+# Paths to the saved model, scaler, and PCA
+model_path = '/Users/admin1/Documents/Audio/combined/svm_model_rbf.joblib'
+scaler_path = '/Users/admin1/Documents/Audio/combined/scaler.joblib'
+pca_path = '/Users/admin1/Documents/Audio/combined/pca.joblib'
+
+# Load the saved model, scaler, and PCA
+svm_model = joblib.load(model_path)
+scaler = joblib.load(scaler_path)
+pca = joblib.load(pca_path)
+
+# Define label mapping for easy interpretation
+label_map = {0: 'NB', 1: 'OD', 2: 'ID'}
+
+
+# Function to extract features from Mel spectrogram images
+def extract_image_features(image_path):
+    try:
+        image = Image.open(image_path).convert('L')  # Convert image to grayscale
+        image = image.resize((128, 128))  # Resize image to a fixed size
+        image_data = np.array(image).flatten()  # Flatten the image into a 1D array
+        return image_data
+    except Exception as e:
+        print(f"Error loading image {image_path}: {e}")
+        return None
+
+
+# Function to predict and update GUI labels
+def predict_and_update_labels():
+    svm_predictions = []
+    for image_path in image_paths:
+        feature_vector = extract_image_features(image_path)
+        if feature_vector is not None:
+            feature_vector = scaler.transform([feature_vector])
+            feature_vector_reduced = pca.transform(feature_vector)
+            prediction = svm_model.predict(feature_vector_reduced)
+            predicted_group = label_map[prediction[0]]
+            svm_predictions.append(predicted_group)
+
+            # Update GUI labels
+            if image_path == image_paths[0]:
+                sample_label.config(text=f"Sample Prediction : {predicted_group}")
+            elif image_path == image_paths[1]:
+                model1_label.config(text=f"NB Model Prediction : {predicted_group}")
+            elif image_path == image_paths[2]:
+                model2_label.config(text=f"OD Model Prediction : {predicted_group}")
+            elif image_path == image_paths[3]:
+                model3_label.config(text=f"ID Model Prediction : {predicted_group}")
+
+    return svm_predictions
+
+
+# Function to compute histogram of an image
+def compute_histogram(image_path):
+    try:
+        image = Image.open(image_path).convert('L')  # Convert image to grayscale
+        image = image.resize((128, 128))  # Resize image to a fixed size
+        histogram, _ = np.histogram(np.array(image).ravel(), bins=256, range=(0, 256))
+        return histogram
+    except Exception as e:
+        print(f"Error loading image {image_path}: {e}")
+        return None
+
+
+# Function to compute similarity using histograms
+def compute_histogram_similarity(histograms):
+    num_images = len(histograms)
+    similarities = np.zeros((num_images, num_images))
+    for i in range(num_images):
+        for j in range(i + 1, num_images):
+            sim = np.corrcoef(histograms[i], histograms[j])[0, 1]
+            similarities[i][j] = sim
+            similarities[j][i] = sim
+    return similarities
+
+
+# Function to update Tkinter labels with similarity values
+def update_labels():
+    histograms = [compute_histogram(path) for path in image_paths]
+
+    if any(h is None for h in histograms):
+        print("Error in processing some images.")
+        return None
+
+    similarity_matrix = compute_histogram_similarity(histograms)
+
+    # Define pairs to compare
+    pairs = [
+        (0, 1, 'NB'),
+        (0, 2, 'OD'),
+        (0, 3, 'ID')
+    ]
+
+    similarities = {}
+    for i, (index1, index2, label) in enumerate(pairs):
+        similarity = similarity_matrix[index1][index2]
+        similarities[label] = similarity
+
+    # Update labels with computed similarity
+    model1_compare.config(text=f"Sample Vs NB Comparison: {similarities.get('NB', 0):.2f} %")
+    model2_compare.config(text=f"Sample Vs OD Comparison: {similarities.get('OD', 0):.2f} %")
+    model3_compare.config(text=f"Sample Vs ID Comparison: {similarities.get('ID', 0):.2f} %")
+
+    return similarities
+
+
+# Function to determine the final bearing type
+def determine_bearing_type(svm_predictions, similarities):
+    if similarities is None:
+        print("Error: Similarity data is not available.")
+        return "Unknown"
+
+    # Analyze SVM predictions
+    svm_counts = {0: svm_predictions.count('NB'), 1: svm_predictions.count('OD'), 2: svm_predictions.count('ID')}
+    most_likely_svm = max(svm_counts, key=svm_counts.get)
+    most_likely_svm_label = label_map[most_likely_svm]
+
+    # Analyze Mel spectrogram similarity
+    mel_threshold = 0.70
+    similar_count = sum(1 for score in similarities.values() if score > mel_threshold)
+
+    # Determine final bearing type
+    svm_weight = 0.55
+    mel_weight = 0.45
+    final_score = (svm_weight * most_likely_svm) + (mel_weight * (similar_count / len(similarities)))
+
+    if final_score < 0.5:
+        return "NB"
+    elif final_score < 1.5:
+        return "OD"
+    else:
+        return "ID"
+
+
+# Function to execute predictions and update labels
+def execute_predictions_and_update():
+    svm_predictions = predict_and_update_labels()
+    similarities = update_labels()
+    final_bearing_type = determine_bearing_type(svm_predictions, similarities)
+    bc_label.config(text=f"Final Bearing Type: {final_bearing_type}")
+
+
+# Define the VAE model architecture
+class ComplexVAE(nn.Module):
+    def __init__(self, latent_dim=512):
+        super(ComplexVAE, self).__init__()
+        self.latent_dim = latent_dim
+
+        # Encoder
+        self.enc_conv1 = nn.Conv2d(3, 32, kernel_size=4, stride=2, padding=1)  # 256x256 -> 128x128
+        self.enc_bn1 = nn.BatchNorm2d(32)
+        self.enc_conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1)  # 128x128 -> 64x64
+        self.enc_bn2 = nn.BatchNorm2d(64)
+        self.enc_conv3 = nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1)  # 64x64 -> 32x32
+        self.enc_bn3 = nn.BatchNorm2d(128)
+        self.enc_conv4 = nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1)  # 32x32 -> 16x16
+        self.enc_bn4 = nn.BatchNorm2d(256)
+        self.enc_conv5 = nn.Conv2d(256, 512, kernel_size=4, stride=2, padding=1)  # 16x16 -> 8x8
+        self.enc_bn5 = nn.BatchNorm2d(512)
+        self.enc_conv6 = nn.Conv2d(512, 1024, kernel_size=4, stride=2, padding=1)  # 8x8 -> 4x4
+
+        self.fc1 = nn.Linear(1024 * 4 * 4, 512)
+        self.fc_bn1 = nn.BatchNorm1d(512)
+        self.fc2 = nn.Linear(512, latent_dim)
+        self.fc3 = nn.Linear(512, latent_dim)
+
+        # Decoder
+        self.fc4 = nn.Linear(latent_dim, 512)
+        self.fc_bn2 = nn.BatchNorm1d(512)
+        self.fc5 = nn.Linear(512, 1024 * 4 * 4)
+
+        self.dec_conv1 = nn.ConvTranspose2d(1024, 512, kernel_size=4, stride=2, padding=1)  # 4x4 -> 8x8
+        self.dec_bn1 = nn.BatchNorm2d(512)
+        self.dec_conv2 = nn.ConvTranspose2d(512, 256, kernel_size=4, stride=2, padding=1)  # 8x8 -> 16x16
+        self.dec_bn2 = nn.BatchNorm2d(256)
+        self.dec_conv3 = nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1)  # 16x16 -> 32x32
+        self.dec_bn3 = nn.BatchNorm2d(128)
+        self.dec_conv4 = nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1)  # 32x32 -> 64x64
+        self.dec_bn4 = nn.BatchNorm2d(64)
+        self.dec_conv5 = nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1)  # 64x64 -> 128x128
+        self.dec_bn5 = nn.BatchNorm2d(32)
+        self.dec_conv6 = nn.ConvTranspose2d(32, 3, kernel_size=4, stride=2, padding=1)  # 128x128 -> 256x256
+
+    def encode(self, x):
+        x = torch.nn.functional.leaky_relu(self.enc_bn1(self.enc_conv1(x)), negative_slope=0.2)
+        x = torch.nn.functional.leaky_relu(self.enc_bn2(self.enc_conv2(x)), negative_slope=0.2)
+        x = torch.nn.functional.leaky_relu(self.enc_bn3(self.enc_conv3(x)), negative_slope=0.2)
+        x = torch.nn.functional.leaky_relu(self.enc_bn4(self.enc_conv4(x)), negative_slope=0.2)
+        x = torch.nn.functional.leaky_relu(self.enc_bn5(self.enc_conv5(x)), negative_slope=0.2)
+        x = torch.nn.functional.leaky_relu(self.enc_conv6(x))
+        x = x.view(-1, 1024 * 4 * 4)
+        x = torch.nn.functional.leaky_relu(self.fc_bn1(self.fc1(x)), negative_slope=0.2)
+        mu = self.fc2(x)
+        logvar = self.fc3(x)
+        return mu, logvar
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def decode(self, z):
+        z = torch.nn.functional.leaky_relu(self.fc_bn2(self.fc4(z)), negative_slope=0.2)
+        z = torch.nn.functional.leaky_relu(self.fc5(z))
+        z = z.view(-1, 1024, 4, 4)
+        z = torch.nn.functional.leaky_relu(self.dec_bn1(self.dec_conv1(z)), negative_slope=0.2)
+        z = torch.nn.functional.leaky_relu(self.dec_bn2(self.dec_conv2(z)), negative_slope=0.2)
+        z = torch.nn.functional.leaky_relu(self.dec_bn3(self.dec_conv3(z)), negative_slope=0.2)
+        z = torch.nn.functional.leaky_relu(self.dec_bn4(self.dec_conv4(z)), negative_slope=0.2)
+        z = torch.nn.functional.leaky_relu(self.dec_bn5(self.dec_conv5(z)), negative_slope=0.2)
+        z = torch.sigmoid(self.dec_conv6(z))  # Ensure output is in [0, 1] range
+        return z
+
+    def forward(self, x):
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        return self.decode(z), mu, logvar
+
+
+# Load the trained models
+latent_dim = 512
+model_paths = {
+    'Normal Bearing': 'nb100_rpm_complex_vae_model.pth',
+    'Outer Damage Bearing': 'od_rpm_complex_vae_model.pth',
+    'Inner Damage Bearing': 'id_rpm_complex_vae_model.pth'
+}
+
+models = {}
+for name, path in model_paths.items():
+    model = ComplexVAE(latent_dim=latent_dim)
+    checkpoint = torch.load(path)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
+    models[name] = model
+
+# Define the transformation to convert the image to a tensor
+transform = transforms.Compose([
+    transforms.Resize((256, 256)),  # Ensure this matches the training transformation
+    transforms.ToTensor(),
+])
+
+# Define the RPM to latent space mapping
+def rpm_to_latent(rpm, rpm_min, rpm_max, latent_dim):
+    normalized_rpm = (rpm - rpm_min) / (rpm_max - rpm_min)
+    z = torch.tensor([normalized_rpm * 2 - 1], dtype=torch.float32)  # Scale to [-1, 1] for latent space
+    z = z.expand(1, latent_dim)
+    return z
+
+# Define the function to generate a MEL spectrogram from a latent vector
+def generate_mel_spectrogram(model, rpm, rpm_min, rpm_max, latent_dim=512):
+    with torch.no_grad():
+        z = rpm_to_latent(rpm, rpm_min, rpm_max, latent_dim)
+        generated_image = model.decode(z).cpu().squeeze().numpy()
+
+        # Convert to (H, W, C) format if needed
+        if generated_image.shape[0] == 1:
+            generated_image = np.repeat(generated_image, 3, axis=0)
+        elif generated_image.shape[0] != 3:
+            raise ValueError(f"Unexpected shape: {generated_image.shape}")
+
+        return generated_image
+
+# Initialize global variables for manual/live mode
+live_mode = True
+sampling_active = False
+sampling_thread = None
+
+# Create the Tkinter application
+root = tk.Tk()
+root.title("Live RPM and MEL Spectrogram Display")
+root.geometry("660x650")  # Adjust window size as needed
+root.configure(bg='lightblue')
+
+# RPM Controls
+input_label = tk.Label(root, text="Controls",font=("Helvetica", 16))
+input_label.configure(bg='lightblue')
+input_label.place(x=70, y=10)
+
+rpm_label = tk.Label(root, text="RPM:")
+rpm_label.configure(bg='lightblue')
+rpm_label.place(x=55, y=45)
+
+rpm_input = tk.Entry(root, width=5)
+rpm_input.config(bg='gray')
+rpm_input.place(x=100, y=45)
+
+rpm_display_label = tk.Label(root, text="Current RPM: --")
+rpm_display_label.configure(bg='lightblue')
+rpm_display_label.place(x=40, y=75)
+
+# Button to toggle between manual and live mode
+def toggle_mode():
+    global live_mode
+    live_mode = not live_mode
+    mode_label = "Live Mode" if live_mode else "Manual Mode"
+    mode_button.config(text=mode_label)
+    if not live_mode:
+        rpm_input.bind("<KeyRelease>", manual_update_spectrogram)
+        rpm_input.config(bg='white')
+    else:
+        rpm_input.unbind("<KeyRelease>")
+        rpm_input.config(bg='gray')
+
+mode_button = tk.Button(root, text="Live Mode", command=toggle_mode, width=10)
+mode_button.place(x=60, y=110)
+
+# Label for the local MEL spectrogram
+sample_label = tk.Label(root, text="Current Sample",font=("Helvetica", 16))
+sample_label.configure(bg='lightblue')
+sample_label.place(x=45, y=150)
+
+local_spectrogram_label = tk.Label(root, image=ImageTk.PhotoImage(Image.new('RGB', (256, 256))))
+local_spectrogram_label.place(x=30, y=180, width=150, height=150)
+
+sample_label = tk.Label(root, text="System Description",font=("Helvetica", 16))
+sample_label.configure(bg='lightblue')
+sample_label.place(x=35, y=345)
+
+
+image_path = '/Users/admin1/Documents/Audio/uu1.png'
+img = Image.open(image_path)
+scaled_img = img.resize((180, 120), Image.LANCZOS)  # Scale the image to 250x180 using LANCZOS filter
+photo = ImageTk.PhotoImage(scaled_img)
+label = tk.Label(root, image=photo, bg="lightblue")  # Set background color if needed
+label.place(x=10, y=510)
+
+# Model Generation
+input_label = tk.Label(root, text="Model Generation",font=("Helvetica", 16))
+input_label.configure(bg='lightblue')
+input_label.place(x=227, y=10)
+
+# Create a frame for the plots
+plot_frame1 = tk.Frame(root)
+plot_frame1.place(x=187, y=45, width=200, height=600)
+plot_frame1.configure(bg='lightblue')
+
+# Create frames for each model's spectrogram and description
+model_names = ['Normal Bearing', 'Outer Damage Bearing', 'Inner Damage Bearing']
+output_labels = []
+for i, name in enumerate(model_names):
+    frame = tk.Frame(plot_frame1)
+    frame.pack(pady=5, padx=5, fill='both', expand=True)
+    frame.configure(bg='lightblue')
+
+    label = tk.Label(frame, image=ImageTk.PhotoImage(Image.new('RGB', (256, 256))))
+    label.image = label.cget('image')
+
+    label.pack()
+
+    description = tk.Label(frame, text=name)
+    description.configure(bg='lightblue')
+    description.pack()
+
+    output_labels.append((label, description))
+
+# Mel Comparison
+input_label = tk.Label(root, text="Mel Comparison",font=("Helvetica", 16))
+input_label.configure(bg='lightblue')
+input_label.place(x=455, y=10)
+
+model1_compare = tk.Label(root, text="NB Model Prediction : --")
+model1_compare.configure(bg='lightblue')
+model1_compare.place(x=410, y=45)
+model2_compare = tk.Label(root, text="OD Model Prediction : --")
+model2_compare.configure(bg='lightblue')
+model2_compare.place(x=410, y=75)
+model3_compare = tk.Label(root, text="ID Model Prediction : --")
+model3_compare.configure(bg='lightblue')
+model3_compare.place(x=410, y=105)
+
+
+
+# SVM Classification
+input_label = tk.Label(root, text="SVM Classification",font=("Helvetica", 16))
+input_label.configure(bg='lightblue')
+input_label.place(x=450, y=150)
+
+img_path = '/Users/admin1/Documents/Audio/SVM.png'
+img = Image.open(img_path)
+scaled_img = img.resize((250, 180), Image.LANCZOS)  # Resize to fit within 800x600 pixels
+tk_img = ImageTk.PhotoImage(scaled_img)
+label = tk.Label(root, image=tk_img)
+label.place(x=390, y=180)  # Adjust x and y coordinates as needed
+
+sample_label = tk.Label(root, text="Sample Prediction: --")
+sample_label.configure(bg='lightblue')
+sample_label.place(x=440, y=370)
+model1_label = tk.Label(root, text="NB Model Prediction: --")
+model1_label.configure(bg='lightblue')
+model1_label.place(x=440, y=400)
+model2_label = tk.Label(root, text="OD Model Prediction: --")
+model2_label.configure(bg='lightblue')
+model2_label.place(x=440, y=430)
+model3_label = tk.Label(root, text="ID Model Prediction: --")
+model3_label.configure(bg='lightblue')
+model3_label.place(x=440, y=460)
+
+
+
+input_label = tk.Label(root, text="Final Prediction",font=("Helvetica", 16))
+input_label.configure(bg='lightblue')
+input_label.place(x=460, y=500)
+
+bc_label= tk.Label(root, text="Bearing condition : --")
+bc_label.configure(bg='lightblue')
+bc_label.place(x=440, y=530)
+
+p_label = tk.Label(root, text="Likeihood --")
+p_label.configure(bg='lightblue')
+p_label.place(x=440, y=560)
+
+
+
+# Function to generate and save MEL spectrogram images
+def update_spectrogram_and_rpm(rpm_value):
+    try:
+        # Ensure rpm_value is a string and convert to float
+        if isinstance(rpm_value, str):
+            rpm_value = rpm_value.strip()
+            if rpm_value == '':
+                return  # Skip if empty
+            rpm_value = float(rpm_value)
+
+            rpm_min = 0
+            rpm_max = 3700
+            if rpm_min <= rpm_value <= rpm_max:
+                # Update RPM display label
+                rpm_display_label.config(text=f"Current RPM: {rpm_value:.2f}")
+
+                # Generate spectrograms for all models
+                for i, model_name in enumerate(model_names):
+                    model = models[model_name]
+                    generated_image = generate_mel_spectrogram(model, rpm_value, rpm_min, rpm_max)
+                    generated_image = np.transpose(generated_image, (1, 2, 0))
+                    generated_image = (generated_image - generated_image.min()) / (generated_image.max() - generated_image.min()) * 255
+                    generated_image = generated_image.astype(np.uint8)
+                    image = Image.fromarray(generated_image)
+
+                    # Save image to file with specific names
+                    file_name = f"audio{i+1}.png"
+                    file_path = os.path.join(spectrogram_directory, file_name)
+                    image.save(file_path)
+
+                    # Resize image to fit the display area
+                    image = image.resize((150, 150), Image.Resampling.LANCZOS)
+                    photo = ImageTk.PhotoImage(image=image)
+                    output_labels[i][0].config(image=photo)
+                    output_labels[i][0].image = photo
+
+                # Update local MEL spectrogram
+                try:
+                    image_files = sorted(
+                        [f for f in os.listdir(spectrogram_directory) if f.endswith('audio.png')],
+                        key=lambda x: os.path.getmtime(os.path.join(spectrogram_directory, x))
+                    )
+                    if image_files:
+                        newest_image = os.path.join(spectrogram_directory, image_files[-1])
+                        image = Image.open(newest_image)
+                        # Resize image to fit the display area
+                        image = image.resize((150, 150), Image.Resampling.LANCZOS)
+                        photo = ImageTk.PhotoImage(image)
+                        local_spectrogram_label.config(image=photo)
+                        local_spectrogram_label.image = photo
+                except Exception as e:
+                    print(f"Error updating local spectrogram: {e}")
+
+            else:
+                messagebox.showerror("Invalid RPM", f"Please enter a value between {rpm_min} and {rpm_max}.")
+        else:
+            messagebox.showerror("Error", "RPM value must be a string.")
+    except Exception as e:
+        messagebox.showerror("Error", str(e))
+
+# Function to periodically update the local MEL spectrogram
+def periodic_update_spectrogram():
+    update_spectrogram_and_rpm(rpm_input.get())  # Refresh spectrogram
+    execute_predictions_and_update()
+    root.after(3000, periodic_update_spectrogram)  # Schedule next update in 3 seconds
+    return
+
+
+# Function to check network connectivity
+def check_network():
+    try:
+        socket.create_connection(("www.google.com", 80), timeout=5)
+        return True
+    except OSError:
+        return False
+
+# Define the MQTT callback functions
+def on_connect(client, userdata, flags, rc):
+    print(f"Connected with result code {rc}")
+    client.subscribe(TOPIC)
+
+def on_message(client, userdata, msg):
+    try:
+        rpm_value = float(msg.payload.decode())
+        if live_mode:
+            update_spectrogram_and_rpm(str(rpm_value))  # Convert float to string
+    except ValueError:
+        messagebox.showerror("Invalid Data", "Received non-numeric RPM value.")
+
+# Initialize MQTT client and handle potential network issues
+mqtt_client = None
+if check_network():
+    mqtt_client = mqtt.Client()
+    mqtt_client.on_connect = on_connect
+    mqtt_client.on_message = on_message
+    try:
+        mqtt_client.connect(BROKER, PORT, 60)
+        mqtt_client.loop_start()  # Start the MQTT client loop
+    except Exception as e:
+        messagebox.showwarning("MQTT Connection Error", f"Could not connect to MQTT broker: {e}")
+
+# Bind RPM input change to update spectrogram in manual mode
+def manual_update_spectrogram(event):
+    update_spectrogram_and_rpm(rpm_input.get())
+
+if live_mode:
+    rpm_input.unbind("<KeyRelease>")
+else:
+    rpm_input.bind("<KeyRelease>", manual_update_spectrogram)
+
+# Start the periodic update for local MEL spectrogram
+root.after(3000, periodic_update_spectrogram)  # Start periodic update every 3 seconds
+
+root.mainloop()
+
+# Stop MQTT client loop when Tkinter window closes
+if mqtt_client:
+    mqtt_client.loop_stop()
