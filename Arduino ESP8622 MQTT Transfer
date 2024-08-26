@@ -1,0 +1,86 @@
+# This code reads in the RPM values from serial 
+# And then transmits it to the MQTT Broker
+
+#include <ESP8266WiFi.h>
+#include <PubSubClient.h>
+
+// WiFi and MQTT settings
+const char* ssid = "VM0614973";
+const char* password = "pk4LtcyxSydf";
+const char* mqtt_server = "192.168.0.35";
+const int mqtt_port = 1883;
+const char* mqtt_topic_publish = "sensor/rpm";
+
+// Initialize WiFi and MQTT client objects
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// Function to connect to Wi-Fi
+void setupWiFi() {
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  WiFi.begin(ssid, password);
+
+  // Wait for Wi-Fi connection
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) { // Limit attempts to avoid endless loop
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nConnected to Wi-Fi");
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nFailed to connect to Wi-Fi");
+  }
+}
+
+// Function to connect to MQTT server
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    if (client.connect("ESP8266Client")) {
+      Serial.println("connected");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" try again in 5 seconds");
+      delay(5000);
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);          // Initialize serial communication
+  setupWiFi();                   // Connect to Wi-Fi
+  client.setServer(mqtt_server, mqtt_port); // Set MQTT server details
+}
+
+void loop() {
+  if (!client.connected()) {
+    reconnect();                // Reconnect if the MQTT client is not connected
+  }
+  client.loop();               // Maintain the MQTT connection
+
+  static String rpmData = "";  // Static variable to retain data across loop iterations
+  while (Serial.available()) {
+    char incomingByte = Serial.read();  // Read a byte from serial
+
+    if (incomingByte == '\n') {
+      if (rpmData.length() > 0) {
+        Serial.print("Publishing: ");
+        Serial.println(rpmData);
+        if (client.publish(mqtt_topic_publish, rpmData.c_str())) {
+          Serial.println("Published successfully");
+        } else {
+          Serial.println("Failed to publish");
+        }
+        rpmData = ""; // Clear the string for the next value
+      }
+    } else {
+      rpmData += incomingByte; // Accumulate the serial data
+    }
+  }
+}
