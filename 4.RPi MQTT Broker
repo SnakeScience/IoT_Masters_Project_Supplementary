@@ -1,0 +1,56 @@
+#This is the raspberry pi code that runs the MQTT broker
+#This code also save the RPM data to influx DB
+
+
+import paho.mqtt.client as mqtt
+from influxdb import InfluxDBClient
+
+# MQTT settings
+MQTT_BROKER = "localhost"
+MQTT_PORT = 1883
+MQTT_TOPIC = "sensor/rpm"  # MQTT topic for RPM data
+
+# InfluxDB settings
+INFLUXDB_ADDRESS = 'localhost'
+INFLUXDB_USER = 'root'
+INFLUXDB_PASSWORD = 'root'
+INFLUXDB_DATABASE = 'rpm_data'
+
+def on_connect(client, userdata, flags, rc):
+    print("Connected with result code " + str(rc))
+    client.subscribe(MQTT_TOPIC)
+
+def on_message(client, userdata, msg):
+    try:
+        rpm_value = float(msg.payload.decode('utf-8'))
+        
+        json_body = [
+            {
+                "measurement": "rpm_data",
+                "fields": {
+                    "rpm_value": rpm_value
+                }
+            }
+        ]
+
+        influxdb_client.write_points(json_body)
+        print(f"Data written to InfluxDB: {json_body}")
+
+    except Exception as e:
+        print(f"Error processing message: {e}")
+
+# Initialize InfluxDB client and database
+influxdb_client = InfluxDBClient(INFLUXDB_ADDRESS, 8086, INFLUXDB_USER, INFLUXDB_PASSWORD, None)
+influxdb_client.create_database(INFLUXDB_DATABASE)
+influxdb_client.switch_database(INFLUXDB_DATABASE)
+
+# Initialize MQTT client
+mqtt_client = mqtt.Client()
+mqtt_client.on_connect = on_connect
+mqtt_client.on_message = on_message
+
+# Connect to MQTT broker and start listening for messages
+mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+mqtt_client.loop_forever()
+
+
