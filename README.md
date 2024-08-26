@@ -11,6 +11,6 @@ Project Supervisor : Gabriel Gonçalves Machado
 Date : 26/08/24
 
 
-Supplementary Materials can be found here in the Wiki : 
+##Supplementary Materials can be found here in the Wiki : 
 
 https://github.com/SnakeScience/IoT_Masters_Project_Supplementary/wiki
