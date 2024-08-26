@@ -1,0 +1,175 @@
+#This code runs parallel with the Dashboard to sample audio data from serial
+
+import serial
+import time
+import os
+import numpy as np
+import wave
+import librosa
+import matplotlib.pyplot as plt
+import threading  # Make sure to import the threading module
+
+# Parameters
+port = '/dev/tty.usbmodem14101'  # Update with your serial port
+baudrate = 115200
+output_directory = os.path.expanduser('~/Documents/Audio/live')  # Directory for .txt files
+wav_output_directory = os.path.expanduser('~/Documents/Audio/live_wav')  # Directory for .wav files
+spectrogram_output_path = os.path.expanduser('~/Documents/Audio/spectrograms/audio.png')  # Path for MEL spectrograms
+sample_rate = 15000  # Sample rate used in Arduino code
+timeout = 10  # Seconds to wait for data
+
+# Ensure the output directories exist
+os.makedirs(output_directory, exist_ok=True)
+os.makedirs(wav_output_directory, exist_ok=True)
+
+# Flag to control sampling
+sampling_active = False
+
+def open_serial_port(port, baudrate):
+    """Open the serial port."""
+    try:
+        ser = serial.Serial(port, baudrate, timeout=1)
+        return ser
+    except serial.SerialException as e:
+        print(f"Error opening serial port: {e}")
+        return None
+
+def convert_txt_to_wav(txt_file_path, wav_file_path, sample_rate):
+    """Convert a text file of audio samples to a WAV file."""
+    with open(txt_file_path, 'r') as file:
+        data = file.readlines()
+
+    try:
+        samples = [int(line.strip()) for line in data if line.strip()]
+    except ValueError as e:
+        print(f"Error reading data from {txt_file_path}: {e}")
+        return
+
+    # Normalize the data (assuming 10-bit data and scaling to 16-bit PCM)
+    max_val = 1023  # Maximum value for 10-bit data
+    scaled_samples = np.array(samples) * (32767 / max_val)
+
+    # Convert data to 16-bit PCM format
+    pcm_data = scaled_samples.astype(np.int16).tobytes()
+
+    # Write to WAV file
+    with wave.open(wav_file_path, 'w') as wf:
+        wf.setnchannels(1)  # Mono
+        wf.setsampwidth(2)  # 2 bytes per sample
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_data)
+
+    print(f"Converted {txt_file_path} to {wav_file_path}")
+
+    # Generate the MEL spectrogram
+    generate_mel_spectrogram(wav_file_path)
+
+def generate_mel_spectrogram(wav_file_path):
+    """Generate a MEL spectrogram and save it as 'audio.png'."""
+    y, sr = librosa.load(wav_file_path, sr=sample_rate)
+
+    # Generate MEL spectrogram
+    mel_spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=256, fmax=8000)
+    mel_spectrogram_db = librosa.power_to_db(mel_spectrogram, ref=np.max)
+
+    # Plot and save the spectrogram as an image
+    plt.figure(figsize=(2.56, 2.56), dpi=100)  # Ensures 256x256 image size
+    plt.axis('off')  # Remove axes
+    plt.imshow(mel_spectrogram_db, aspect='auto', origin='lower', cmap='viridis')
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)  # Remove padding
+
+    # Save the spectrogram as 'audio.png'
+    plt.savefig(spectrogram_output_path, bbox_inches='tight', pad_inches=0)
+    plt.close()
+
+    print(f"Saved MEL spectrogram to {spectrogram_output_path}")
+
+def read_and_save_data(ser):
+    """Read data from the serial port and save it to a text file."""
+    global sampling_active
+
+    while sampling_active:
+        # Determine the next file index
+        index = 1  # Always use the same index for simplicity
+
+        # Generate file names
+        txt_file_name = f'audio_{index}.txt'
+        wav_file_name = f'audio_{index}.wav'
+
+        txt_file_path = os.path.join(output_directory, txt_file_name)
+        wav_file_path = os.path.join(wav_output_directory, wav_file_name)
+
+        with open(txt_file_path, 'w') as file:
+            print(f"Waiting for start character... (saving to: {txt_file_path})")
+
+            # Wait for the start character '#'
+            while sampling_active:
+                if ser.in_waiting > 0:
+                    start_char = ser.read().decode('utf-8').strip()
+                    if start_char == '#':
+                        print("Start character detected. Starting data capture...")
+                        break
+
+            # Capture data until end character '!'
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                if ser.in_waiting > 0:
+                    line = ser.readline().decode('utf-8').strip()
+                    if line == '!':
+                        print("End character detected. Saving and converting file...")
+                        break
+                    # Write data to the file
+                    file.write(line + '\n')
+
+        # Convert the .txt file to .wav
+        convert_txt_to_wav(txt_file_path, wav_file_path, sample_rate)
+
+        # Check if sampling is still active
+        if not sampling_active:
+            break
+
+        print("Sampling again...")
+
+def start_sampling(ser):
+    """Start the sampling process."""
+    global sampling_active
+    sampling_active = True
+    read_and_save_data(ser)
+
+def stop_sampling():
+    """Stop the sampling process."""
+    global sampling_active
+    sampling_active = False
+    print("Stopping sampling...")
+
+def main():
+    ser = open_serial_port(port, baudrate)
+
+    if ser:
+        try:
+            while True:
+                command = input("Enter 'start' to begin sampling or 'stop' to end: ").strip().lower()
+                if command == 'start':
+                    if not sampling_active:
+                        print("Starting sampling...")
+                        sampling_thread = threading.Thread(target=start_sampling, args=(ser,))
+                        sampling_thread.start()
+                    else:
+                        print("Sampling is already active.")
+                elif command == 'stop':
+                    if sampling_active:
+                        stop_sampling()
+                        sampling_thread.join()  # Wait for the sampling thread to fully stop
+                    else:
+                        print("Sampling is not currently active.")
+                else:
+                    print("Invalid command. Please enter 'start' or 'stop'.")
+        except KeyboardInterrupt:
+            print("\nSampling stopped by user.")
+        finally:
+            ser.close()
+    else:
+        print("Failed to open serial port. Exiting.")
+
+if __name__ == "__main__":
+    main()
