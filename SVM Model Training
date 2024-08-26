@@ -1,0 +1,133 @@
+# last changed 26/08/24
+
+# This code is used to train a RBF SVM model using the bearing spectrograms
+
+
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn import svm
+from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, ConfusionMatrixDisplay
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+import joblib
+from PIL import Image
+
+# Define folder paths and label mapping
+folders = {
+    'NB25': '/Users/admin1/Documents/Audio/combined/NB25/mels_1/',
+    'NB30': '/Users/admin1/Documents/Audio/combined/NB30/mels_1/',
+    'NB40': '/Users/admin1/Documents/Audio/combined/NB40/mels_1/',
+    'NB50': '/Users/admin1/Documents/Audio/combined/NB50/mels_1/',
+    'OD25': '/Users/admin1/Documents/Audio/combined/OD25/mels_1/',
+    'OD30': '/Users/admin1/Documents/Audio/combined/OD30/mels_1/',
+    'OD40': '/Users/admin1/Documents/Audio/combined/OD40/mels_1/',
+    'OD50': '/Users/admin1/Documents/Audio/combined/OD50/mels_1/',
+    'ID25': '/Users/admin1/Documents/Audio/combined/ID25/mels_1/',
+    'ID30': '/Users/admin1/Documents/Audio/combined/ID30/mels_1/',
+    'ID40': '/Users/admin1/Documents/Audio/combined/ID40/mels_1/',
+    'ID50': '/Users/admin1/Documents/Audio/combined/ID50/mels_1/',
+}
+
+label_map = {
+    'NB': 0,
+    'OD': 1,
+    'ID': 2
+}
+
+
+# Function to extract features from Mel spectrogram images
+def extract_image_features(image_path):
+    try:
+        image = Image.open(image_path).convert('L')  # Convert to grayscale
+        image = image.resize((128, 128))  # Resize image
+        image_data = np.array(image).flatten()  # Flatten to 1D array
+        return image_data
+    except Exception as e:
+        print(f"Error loading image {image_path}: {e}")
+        return None
+
+
+# Function to load data from folders
+def load_data_from_folders(folders, label_map):
+    features = []
+    labels = []
+
+    for folder_name, folder_path in folders.items():
+        label = label_map['NB'] if folder_name.startswith('NB') else \
+            label_map['OD'] if folder_name.startswith('OD') else \
+                label_map['ID']
+
+        for filename in os.listdir(folder_path):
+            if filename.endswith('.png'):
+                file_path = os.path.join(folder_path, filename)
+                feature_vector = extract_image_features(file_path)
+                if feature_vector is not None:
+                    features.append(feature_vector)
+                    labels.append(label)
+
+    return np.array(features), np.array(labels)
+
+
+# Load and preprocess data
+X, y = load_data_from_folders(folders, label_map)
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+# Reduce dimensions to 2D for visualization
+pca = PCA(n_components=2)
+X_reduced = pca.fit_transform(X_scaled)
+
+
+
+# Split the data into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(X_reduced, y, test_size=0.3, random_state=127)
+
+# Hyperparameter tuning
+param_grid = {
+    'C': [0.1, 1, 10, 100],
+    'gamma': [0.01, 0.1, 1, 10],
+    'kernel': ['rbf']
+}
+
+
+
+
+
+grid_search = GridSearchCV(svm.SVC(), param_grid, cv=5, scoring='accuracy')
+grid_search.fit(X_train, y_train)
+
+best_model = grid_search.best_estimator_
+
+# Train the SVM model
+best_model.fit(X_train, y_train)
+
+# Predict on the test data
+y_pred = best_model.predict(X_test)
+
+# Evaluate the model
+accuracy = accuracy_score(y_test, y_pred)
+report = classification_report(y_test, y_pred)
+conf_matrix = confusion_matrix(y_test, y_pred)
+
+print(f'Accuracy: {accuracy:.2f}')
+print('Classification Report:')
+print(report)
+print('Confusion Matrix:')
+disp = ConfusionMatrixDisplay(conf_matrix, display_labels=['NB', 'OD', 'ID'])
+disp.plot(cmap=plt.cm.Blues)
+plt.show()
+
+# Save the trained model, scaler, and PCA
+model_filename = '/Users/admin1/Documents/Audio/combined/svm_model_rbf.joblib'
+joblib.dump(best_model, model_filename)
+scaler_filename = '/Users/admin1/Documents/Audio/combined/scaler.joblib'
+pca_filename = '/Users/admin1/Documents/Audio/combined/pca.joblib'
+joblib.dump(scaler, scaler_filename)
+joblib.dump(pca, pca_filename)
+print(f"Model, scaler, and PCA saved to {model_filename}, {scaler_filename}, {pca_filename}")
+
+
+
+
